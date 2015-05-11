@@ -1,6 +1,6 @@
 
 /*
- * radiosonde RS41-SG
+ * radiosondes RS41-SG(P)
  * author: zilog80
  * usage:
  *     gcc rs41stdin.c -lm -o rs41stdin
@@ -45,6 +45,7 @@ gpx_t gpx;
 int option_verbose = 0,  // ausfuehrliche Anzeige
     option_raw = 0,      // rohe Frames
     option_inv = 0,      // invertiert Signal
+    option_res = 0,      // genauere Bitmessung
     wavloaded = 0;
 
 
@@ -160,60 +161,62 @@ int read_wav_header(FILE *fp) {
     return 0;
 }
 
-int read_sample(FILE *fp) {  // int = i32_t
-    int byte, i, ret;        // return ui16_t/ui8_t oder EOF
+
+#define EOF_INT  0x1000000
+
+int read_signed_sample(FILE *fp) {  // int = i32_t
+    int byte, i, ret;         //  EOF -> 0x1000000
 
     for (i = 0; i < channels; i++) {
-                          // i = 0: links bzw. mono
+                           // i = 0: links bzw. mono
         byte = fgetc(fp);
-        if (byte == EOF) return EOF;
+        if (byte == EOF) return EOF_INT;
         if (i == 0) ret = byte;
     
         if (bits_sample == 16) {
             byte = fgetc(fp);
-            if (byte == EOF) return EOF;
+            if (byte == EOF) return EOF_INT;
             if (i == 0) ret +=  byte << 8;
         }
 
     }
-                 // unsigned 8/16 bit sample >= 0
-    return ret;  // EOF < 0
-}
 
-int sign(int sample) {
-    int sgn = 0;
-    if (bits_sample == 8) {                         // unsigned char:
-        if (sample & 0x80) sgn = 1; else sgn = -1;  // 00..7F - , 80..FF: +
-    }
-    else if (bits_sample == 16) {
-        if (sample & 0x8000) sgn = -1; else sgn = 1;
-    }
-    return sgn;
+    if (bits_sample ==  8) return ret-128;
+    if (bits_sample == 16) return (short)ret;
+
+    return ret;
 }
 
 int par=1, par_alt=1;
 unsigned long sample_count = 0;
 
 int read_bits_fsk(FILE *fp, int *bit, int *len) {
-    int n, sample;
-    float l;
+    int n, sample, y0;
+    float l, x1;
+    static float x0;
 
     n = 0;
     do{
-        sample = read_sample(fp);  // unsigned sample;
-        if (sample == EOF) return EOF; // usample >= 0
-        par_alt = par;
-        par = sign(sample);
+        y0 = sample;
+        sample = read_signed_sample(fp);
+        if (sample == EOF_INT) return EOF;
         sample_count++;
+        par_alt = par;
+        par =  (sample > 0) ? 1 : -1;
         n++;
     } while (par*par_alt > 0);
 
-    l = (float)n / samples_per_bit;  // abw = n % samples_per_bit;
+    if (!option_res) l = (float)n / samples_per_bit;
+    else {                                 // genauere Bitlaengen-Messung
+        x1 = sample/(float)(sample-y0);    // hilft bei niedriger sample rate
+        l = (n+x0-x1) / samples_per_bit;   // meist mehr frames (nicht immer)
+        x0 = x1;
+    }
 
     *len = (int)(l+0.5);
 
     if (!option_inv) *bit = (1-par_alt)/2;  // unten 1, oben -1
-    else             *bit = (1+par_alt)/2;  // inverse:
+    else             *bit = (1+par_alt)/2;  // inverse
 
     /* Y-offset ? */
 
@@ -298,6 +301,8 @@ SubHeader, 2byte
 #define pos_Calfreq   0x055  // 2 byte, calfr 0x00
 #define pos_Calburst  0x05E  // 1 byte, calfr 0x02
 // ? #define pos_Caltimer  0x05A  // 2 byte, calfr 0x02 ?
+#define pos_CalRSTyp  0x05B  // 8 byte, calfr 0x21 (+2 byte in 0x22?)
+        // weitere chars in calfr 0x22/0x23; weitere ID
 #define pos_GPSweek   0x095  // 2 byte
 #define pos_GPSTOW    0x097  // 4 byte
 #define pos_GPSecefX  0x114  // 4 byte
@@ -305,12 +310,83 @@ SubHeader, 2byte
 #define pos_GPSecefZ  0x11C  // 4 byte
 
 
+#define pos_Hframe 0x039
+#define HEAD_frame 0x1713  // ^0x6E3B=0x7928
+
+#define pos_Htow   0x093
+#define HEAD_tow   0x9667  // ^0xEA79=0x7C1E
+
+#define pos_Hkoord 0x112
+#define HEAD_koord 0xB9FF  // ^0xC2EA=0x7B15
+
+unsigned shiftLeft(int pos) {
+    unsigned tmp;
+    tmp = (frame[pos+1]<<8) + frame[pos];
+    tmp = (tmp >> 1) & 0xFF;
+    return tmp;
+}
+int shiftRight(int pos) {
+    unsigned tmp;
+    tmp = (frame[pos]<<8) + frame[pos-1];
+    tmp = (tmp >> 7) & 0xFF;
+    return tmp;
+}
+
+void shiftFrame(int pos, int shift) {
+    unsigned byte, byte1, byte2;
+
+    if (shift > 0) {
+        while (pos < FRAME_LEN) {
+            byte = shiftLeft(pos);
+            frame[pos] = byte;
+            pos++;
+        }
+    }
+    if (shift < 0) {
+        byte1 = shiftRight(pos);
+        pos++;
+        while (pos < FRAME_LEN) {
+            byte2 = shiftRight(pos);
+            frame[pos-1] = byte1;
+            byte1 = byte2;
+            pos++;
+        }
+    }
+
+}
+
+int getShift(int pos, unsigned head) {
+    unsigned byte;
+    int shift = 0;
+
+    byte = (frame[pos]<<8) + frame[pos+1];
+    // fprintf(stdout, "0x%04X ", byte );  // HEAD_frame ^ 0x6E38 == 0x7928 ? 
+    if (byte != head) {
+        byte = (shiftLeft(pos)<<8) + shiftLeft(pos+1);
+        //fprintf(stdout, " %04X", byte);
+        if (byte == HEAD_frame) shift = 1;
+        else {
+            byte = (shiftRight(pos)<<8) + shiftRight(pos+1);
+            if (byte == head) shift = -1;
+        }
+        if (!shift) return 0x100;
+        //printf("shift:%2d ", shift);
+    }
+    return shift;
+}
+
 int get_FrameNb() {
     int i;
     unsigned byte;
     ui8_t frnr_bytes[2];
     int frnr;
+/*  int shift = 0;
 
+    shift = getShift(pos_Hframe, HEAD_frame);
+    if (shift == 0x100) return 0x100;
+    //printf("shift:%2d ", shift);
+    shiftFrame(pos_Hframe, shift);
+*/
     for (i = 0; i < 2; i++) {
         byte = xorbyte(pos_FrameNb + i);
         frnr_bytes[i] = byte;
@@ -346,7 +422,13 @@ int get_GPSweek() {
     unsigned byte;
     ui8_t gpsweek_bytes[2];
     int gpsweek;
+/*  int shift = 0;
 
+    shift = getShift(pos_Htow, HEAD_tow);
+    if (shift == 0x100) return 0x100;
+    //printf("shift:%2d ", shift);
+    shiftFrame(pos_Htow, shift);
+*/
     for (i = 0; i < 2; i++) {
         byte = xorbyte(pos_GPSweek + i);
         gpsweek_bytes[i] = byte;
@@ -420,23 +502,6 @@ void ecef2elli(double X[], double *lat, double *lon, double *h) {
     *lon = lam*180/M_PI;
 }
 
-
-#define pos_Hkoord 0x112
-#define HEAD_koord 0xB9FF
-
-unsigned shiftLeft(int pos) {
-    unsigned tmp;
-    tmp = (frame[pos+1]<<8) + frame[pos];
-    tmp = (tmp >> 1) & 0xFF;
-    return tmp;
-}
-int shiftRight(int pos) {
-    unsigned tmp;
-    tmp = (frame[pos]<<8) + frame[pos-1];
-    tmp = (tmp >> 7) & 0xFF;
-    return tmp;
-}
-
 int get_GPSkoord() {
     int i, k;
     unsigned byte;
@@ -488,6 +553,7 @@ int get_Cal() {
     ui8_t calfr = 0;
     ui8_t burst = 0;
     int freq = 0, f0 = 0, f1 = 0;
+    char sondetyp[9];
 
     byte = xorbyte(pos_CalData);
     calfr = byte;
@@ -512,13 +578,21 @@ int get_Cal() {
             freq = 400000 + f1+f0; // kHz;
             fprintf(stderr, ": fq %d ", freq);
         }
+        if (calfr == 0x21) {  // eventuell noch zwei bytes in 0x22
+            for (i = 0; i < 9; i++); sondetyp[i] = 0;
+            for (i = 0; i < 8; i++) {
+                byte = xorbyte(pos_CalRSTyp + i);
+                if ((byte >= 0x20) && (byte < 0x80)) sondetyp[i] = byte;
+                else if (byte == 0x00) sondetyp[i] = '\0';
+            }
+            fprintf(stderr, ": %s ", sondetyp);
+        }
     }
 
     return 0;
 }
 
 /* ------------------------------------------------------------------------------------ */
-
 
 int print_position() {
     int err;
@@ -599,6 +673,7 @@ int main(int argc, char *argv[]) {
             option_verbose = 1;
         }
         else if   (strcmp(*argv, "-vv") == 0) { option_verbose = 2; }
+        else if   (strcmp(*argv, "--res") == 0) { option_res = 1; }
         else if ( (strcmp(*argv, "-r") == 0) || (strcmp(*argv, "--raw") == 0) ) {
             option_raw = 1;
         }
@@ -628,12 +703,14 @@ int main(int argc, char *argv[]) {
     while (!read_bits_fsk(fp, &bit, &len)) {
 
         if (len == 0) { // reset_frame();
-            if (byte_count > FRAME_LEN-20) print_frame(byte_count);
-            bit_count = 0;
-            byte_count = FRAMESTART;
-            header_found = 0;
-            inc_bufpos();
-            buf[bufpos] = 'x';
+            if (byte_count > FRAME_LEN-20) {
+                print_frame(byte_count);
+                bit_count = 0;
+                byte_count = FRAMESTART;
+                header_found = 0;
+            }
+            //inc_bufpos();
+            //buf[bufpos] = 'x';
             continue;   // ...
         }
 
