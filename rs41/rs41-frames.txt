@@ -1,0 +1,81 @@
+Bit order: bit 0 is received first.
+Frame:
+	64 bit header
+		00001000
+		01101101
+		01010011
+		10001000
+		01000100
+		01101001
+		01001000
+		00011111
+
+	2496 bit data (data is scrambled)
+	
+	position in bit (length in byte)
+	0000 (48) errorcode?
+
+	0384 (1) ? 11110000 -> 15
+	0392 (1) packet header 10011110 -> 121
+	0400 (1) packet length 00010100 -> 40
+		0408 (2) framecounter
+		0424 (8) sonde-ID (ASCII)
+		0488 (12) ?
+		0584 (1) calib-data length 01001100 -> 50 frames
+		0592 (17)  calib-data
+			592 (1)  calib-data-framecounter (0-50)
+			600 (16) data packets
+	728 (2)  CRC-16 CCITT(FFFF) (409 - 728)
+
+	0744 (1) packet header 01011110 -> 122
+	0753 (1) packet length 01010100	-> 42
+		0760 (3) sensor
+		0784 (3) sensor
+		0808 (3) sensor
+		0832 (3) sensor
+		0856 (3) sensor
+		0880 (3) sensor
+		0904 (3) sensor
+		0928 (3) sensor
+		0952 (3) sensor
+		0976 (15) 5 empty sensors
+	1096 (2) CRC-16 CCITT(FFFF) (761 - 1096)
+
+	1112 (1) packet header 00111110 -> 124
+	1120 (1) packet length 01111000	-> 30
+		1128 (2) GPS week
+		1144 (4) GPS TOW in ms
+		1176 (24) ?
+	1368 (2) CRC-16 CCITT(FFFF) (1129 - 1368)
+
+	1384 (1) packet header 10111110 -> 125
+	1392 (1) packet length 10011010 -> 89
+		1400 (32) ?
+		1656 (2)  ? 0xFF
+		1672 (55) ? 0x00
+	2112 (2) CRC-16 CCITT(FFFF) (1401 - 2112)
+
+	2128 (1) packet header 11011110 -> 123
+	2136 (1) packet length 10101000 -> 21
+		2144 (4) ECEF-x = 4119172.34
+		2176 (4) ECEF-y = 559808.02
+		2208 (4) ECEF-z = 4821556.39
+		2240 (9) GPS-Status?
+	2312 (2) CRC-16 CCITT(FFFF) (2145 - 2312)
+
+	2328 (1) packet header 01101110 -> 118
+	2336 (1) packet length 10001000 -> 17
+		2344 (17) GPS-Pseudoranges?
+	2480 (2) CRC-16 CCITT(FFFF) (2345 - 2480)	
+
+
+
+scramblingmatrix: 
+	0x32, 0x05, 0x59, 0x0E, 0xF9, 0x44, 0xC6, 0x26,
+	0x21, 0x60, 0xC2, 0xEA, 0x79, 0x5D, 0x6D, 0xA1,
+	0x54, 0x69, 0x47, 0x0C, 0xDC, 0xE8, 0x5C, 0xF1,
+	0xF7, 0x76, 0x82, 0x7F, 0x07, 0x99, 0xA2, 0x2C,
+	0x93, 0x7C, 0x30, 0x63, 0xF5, 0x10, 0x2E, 0x61,
+	0xD0, 0xBC, 0xB4, 0xB6, 0x06, 0xAA, 0xF4, 0x23,
+	0x78, 0x6E, 0x3B, 0xAE, 0xBF, 0x7B, 0x4C, 0xC1,
+	0x96, 0x83, 0x3E, 0x51, 0xB1, 0x49, 0x08, 0x98
